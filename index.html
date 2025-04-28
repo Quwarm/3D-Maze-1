@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>3D Maze - Simple</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: 'Roboto', Arial, sans-serif;
+      font-size: 18px;
+      color: white;
+      background-color: black;
+    }
+
+    .gameCanvas {
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #ui {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      text-shadow: 1px 1px 2px black;
+    }
+
+    #blocker {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0);
+    }
+
+    #infoBlock {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      cursor: pointer;
+      font-size: 20px;
+    }
+
+    #infoBlock * {
+      margin: 1px;
+      padding: 10px;
+      text-align: center;
+    }
+
+    #playButton,
+    #regenerateMazeButton,
+    #regenerateLightingColorsButton {
+      cursor: pointer;
+    }
+
+    h1 {
+      font-size: 36px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="blocker">
+    <div id="infoBlock">
+      <h1 id="playButton">Click to play</h1>
+      <div>
+        <p>
+          Your task is to find the <span style="color: red">red</span> box
+        </p>
+      </div>
+      <div>
+        <span>Maze size (5-100):</span>
+        <label>
+          <input type="number" id="mazeY" min="5" max="100" value="10">
+        </label>
+        x
+        <label>
+          <input type="number" id="mazeX" min="5" max="100" value="10">
+        </label>
+      </div>
+      <div>
+        <label>
+          <span>Increase the size every N mazes (0:disable|1-20):</span>
+          <input type="number" id="autoModeN" min="1" max="20" value="0">
+        </label>
+      </div>
+      <div>
+        <label>
+          <span>Wall density (10-90%):</span>
+          <input type="number" id="wallDensity" min="10" max="90" value="30">
+        </label>
+      </div>
+      <div>
+        <label>
+          <span>Movement speed (1-20):</span>
+          <input type="number" id="speed" min="1" max="20" value="5">
+        </label>
+      </div>
+      <div>
+        <label>
+          <span>Color accent:</span>
+          <select id="colorAccent">
+            <option value="neutral">Neutral</option>
+            <option value="red">Red</option>
+            <option value="green">Green</option>
+            <option value="blue">Blue</option>
+            <option value="cyan">Cyan</option>
+            <option value="magenta">Magenta</option>
+            <option value="yellow">Yellow</option>
+            <option value="orange">Orange</option>
+            <option value="random-per-maze">Random per maze</option>
+            <option value="random-per-side">Random per side</option>
+          </select>
+        </label>
+      </div>
+      <button id="regenerateLightingColorsButton">Regenerate colors & lighting</button>
+      <button id="regenerateMazeButton">Regenerate maze</button>
+    </div>
+  </div>
+  <canvas id="gameCanvas1" class="gameCanvas"></canvas>
+  <div id="ui">
+    <p>WASD [+shift]: Move [2x] | Space: Jump | Mouse: Look | G: Start position | P: Save Image</p>
+  </div>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three/build/three.module.js",
+        "three/addons/": "https://threejs.org/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+    class GameMap {
+      constructor(canvas, initMazeY = 40, initMazeX = 40, initWallDensity = 50, initMoveSpeed = 5, colorAccent = 'random', initAutoModeN = 0) {
+        this.canvas = canvas;
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        this.renderer = new THREE.WebGLRenderer({
+          canvas: this.canvas,
+          antialias: true
+        });
+        this.eventsCallback = () => { };
+        this.controls = new PointerLockControls(this.camera, this.renderer.domElement);
+        this.controls.addEventListener('lock', () => {
+          this.locked = true;
+          this.eventsCallback({ event: 'lock', status: true });
+        });
+        this.controls.addEventListener('unlock', () => {
+          this.locked = false;
+          this.eventsCallback({ event: 'unlock', status: true });
+        });
+
+        this.player = {
+          height: 1.8,
+          radius: 0.4,
+          velocity: new THREE.Vector3(),
+          position: new THREE.Vector3(1, 1, 1),
+          onGround: false,
+          jumpVelocity: 5,
+          gravity: -9.8 * 3,
+          moveSpeed: 5
+        };
+
+        this.keys = {
+          forward: false,
+          backward: false,
+          left: false,
+          right: false,
+          jump: false,
+          shift: false
+        };
+
+        this.autoModeN = 0;
+        this.autoModeNCounter = 0;
+        this.setParameters({
+          mazeY: initMazeY,
+          mazeX: initMazeX,
+          wallDensity: initWallDensity,
+          speed: initMoveSpeed,
+          colorAccent: colorAccent,
+          autoModeN: initAutoModeN
+        }, false);
+        this.maze = this.generateRandomMaze(this.mazeY, this.mazeX);
+
+        this.wallHeight = 3;
+        this.wallThickness = 2;
+        this.walls = [];
+        this.finishBox = null;
+        this.prevTime = performance.now();
+      }
+
+      findComponents(maze) {
+        const rows = maze.length;
+        const cols = maze[0].length;
+        const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+        const components = [];
+        const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+        function dfs(y, x, component) {
+          if (y < 0 || y >= rows || x < 0 || x >= cols || visited[y][x] || maze[y][x] === 1) {
+            return;
+          }
+          visited[y][x] = true;
+          component.push([y, x]);
+          for (const [dy, dx] of directions) {
+            dfs(y + dy, x + dx, component);
+          }
+        }
+        for (let y = 0; y < rows; y++) {
+          for (let x = 0; x < cols; x++) {
+            if (maze[y][x] === 0 && !visited[y][x]) {
+              const component = [];
+              dfs(y, x, component);
+              components.push(component);
+            }
+          }
+        }
+        return components;
+      }
+
+      shortestPathBetweenComponents(maze, comp1, comp2) {
+        const rows = maze.length;
+        const cols = maze[0].length;
+        let minDistance = Infinity;
+        for (let i = 0; i < comp1.length; ++i) {
+          for (let j = 0; j < comp2.length; ++j) {
+            const distance = Math.pow(comp1[i][0] - comp2[j][0], 2) + Math.pow(comp1[i][1] - comp2[j][1], 2);
+            if (distance < minDistance) {
+              minDistance = distance;
+            }
+          }
+        }
+        return minDistance;
+      }
+
+      kruskal(n, edges) {
+        const parent = Array.from({ length: n }, (_, i) => i);
+        function find(x) {
+          if (parent[x] !== x) {
+            parent[x] = find(parent[x]);
+          }
+          return parent[x];
+        }
+        function union(x, y) {
+          parent[find(x)] = find(y);
+        }
+        const mst = [];
+        edges.sort((a, b) => a[0] - b[0]); // by weight
+        for (const [w, u, v] of edges) {
+          if (find(u) !== find(v)) {
+            union(u, v);
+            mst.push([u, v, w]);
+          }
+        }
+        return mst;
+      }
+
+      connectComponents(maze) {
+        // Step 1: Find connectivity components
+        const components = this.findComponents(maze);
+        if (components.length <= 1) {
+          return maze.map(row => [...row]);
+        }
+        // Step 2: Build a graph of components
+        const n = components.length;
+        const edges = [];
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            const weight = this.shortestPathBetweenComponents(maze, components[i], components[j]);
+            edges.push([weight, i, j]);
+          }
+        }
+        // Step 3: Find MST
+        const mst = this.kruskal(n, edges);
+        // Step 4: Remove walls
+        const resultMaze = maze.map(row => [...row]);
+        for (const [u, v] of mst) {
+          const start = components[u][0];
+          const targetSet = new Set(components[v].map(([y, x]) => `${y},${x}`));
+          const queue = [[start, []]]; // [ [y, x], path ]
+          const visited = new Set([`${start[0]},${start[1]}`]);
+          while (queue.length > 0) {
+            const [[y, x], path] = queue.shift();
+            if (targetSet.has(`${y},${x}`)) {
+              for (const [py, px] of path) {
+                if (resultMaze[py][px] === 1) {
+                  resultMaze[py][px] = 0;
+                }
+              }
+              break;
+            }
+            const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+            for (const [dy, dx] of directions) {
+              const ny = y + dy;
+              const nx = x + dx;
+              if (ny >= 0 && ny < maze.length && nx >= 0 && nx < maze[0].length && !visited.has(`${ny},${nx}`)) {
+                visited.add(`${ny},${nx}`);
+                queue.push([[ny, nx], [...path, [ny, nx]]]);
+              }
+            }
+          }
+        }
+        return resultMaze;
+      }
+
+      generateRandomMaze(yMax, xMax) {
+        let maze = Array(yMax).fill().map(() => Array(xMax).fill(0));
+        for (let y = 1; y < yMax - 1; y++) {
+          for (let x = 1; x < xMax - 1; x++) {
+            maze[y][x] = Math.random() < (this.wallDensity / 100) ? 1 : 0;
+          }
+        }
+        for (let y = 0; y < yMax; y++) {
+          maze[y][0] = 1;
+          maze[y][xMax - 1] = 1;
+        }
+        for (let x = 0; x < xMax; x++) {
+          maze[0][x] = 1;
+          maze[yMax - 1][x] = 1;
+        }
+        maze[1][1] = 0;
+        maze[1][xMax - 2] = 0;
+        maze[yMax - 2][1] = 0;
+        maze[yMax - 2][xMax - 2] = 0;
+        maze = this.connectComponents(maze);
+        return maze;
+      }
+
+      setEventsCallback(eventsCallback) {
+        this.eventsCallback = eventsCallback;
+      }
+
+      setParameters(parameters, regenerate = true) {
+        let changed = false;
+        if (parameters['mazeY'] != null) {
+          parameters['mazeY'] = parseInt(parameters['mazeY']);
+        }
+        if (parameters['mazeY'] != null && parameters['mazeY'] === parameters['mazeY'] && parameters['mazeY'] !== this.mazeY) {
+          this.mazeY = Math.max(5, Math.min(100, parameters['mazeY']));
+          changed = true;
+        }
+        if (parameters['mazeX'] != null) {
+          parameters['mazeX'] = parseInt(parameters['mazeX']);
+        }
+        if (parameters['mazeX'] != null && parameters['mazeX'] === parameters['mazeX'] && parameters['mazeX'] !== this.mazeX) {
+          this.mazeX = Math.max(5, Math.min(100, parameters['mazeX']));
+          changed = true;
+        }
+        if (parameters['wallDensity'] != null) {
+          parameters['wallDensity'] = parseInt(parameters['wallDensity']);
+        }
+        if (parameters['wallDensity'] != null && parameters['wallDensity'] === parameters['wallDensity'] && parameters['wallDensity'] !== this.wallDensity) {
+          this.wallDensity = Math.max(10, Math.min(90, parameters['wallDensity']));
+          changed = true;
+        }
+        if (parameters['speed'] != null) {
+          parameters['speed'] = parseInt(parameters['speed']);
+        }
+        if (parameters['speed'] != null && parameters['speed'] === parameters['speed'] && parameters['speed'] !== this.player.moveSpeed) {
+          this.player.moveSpeed = Math.max(1, Math.min(20, parameters['speed']));
+        }
+        if (parameters['colorAccent'] != null && parameters['colorAccent'] !== this.colorAccent) {
+          this.colorAccent = parameters['colorAccent'];
+          this.setupLighting();
+        }
+        if (parameters['autoModeN'] != null) {
+          parameters['autoModeN'] = parseInt(parameters['autoModeN']);
+        }
+        if (parameters['autoModeN'] != null && parameters['autoModeN'] === parameters['autoModeN'] && parameters['autoModeN'] !== this.autoModeN) {
+          this.autoModeN = Math.max(0, parameters['autoModeN']);
+        }
+        if (changed && regenerate) {
+          this.regenerateMaze();
+        }
+      }
+
+      getParameters() {
+        return {
+          mazeY: this.mazeY,
+          mazeX: this.mazeX,
+          wallDensity: this.wallDensity,
+          speed: this.player.moveSpeed,
+          colorAccent: this.colorAccent,
+          autoModeN: this.autoModeN,
+        };
+      }
+
+      lock() {
+        if (!this.locked) {
+          this.controls.lock();
+        }
+      }
+
+      unlock() {
+        if (this.locked) {
+          this.controls.unlock();
+        }
+      }
+
+      isLocked() {
+        return this.locked;
+      }
+
+      init() {
+        this.setupRenderer();
+        this.setupCamera();
+        this.setupMaze();
+        this.setupLighting();
+        this.setupEventListeners();
+        this.eventsCallback({ event: 'new-maze', status: true, parameters: this.getParameters() });
+        this.animate();
+      }
+
+      setupRenderer() {
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+      }
+
+      setupCamera() {
+        this.camera.position.copy(this.player.position);
+        this.camera.rotation.set(0, 225 * Math.PI / 180, 0);
+      }
+
+      goToStartPosition() {
+        this.player.position.set(1, this.player.height, 1);
+        this.player.velocity.set(0, 0, 0);
+        this.player.onGround = true;
+        this.setupCamera();
+      }
+
+      setupMaze() {
+        const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x888888 });
+        const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        const startBoxMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+        const finishBoxMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+
+        this.walls.forEach(wall => this.scene.remove(wall));
+        this.walls = [];
+        this.scene.children = this.scene.children.filter(child =>
+          !(child.geometry instanceof THREE.PlaneGeometry ||
+            child.material === startBoxMaterial ||
+            child.material === finishBoxMaterial)
+        );
+
+        for (let y = 0; y < this.maze.length; y++) {
+          for (let x = 0; x < this.maze[y].length; x++) {
+            if (this.maze[y][x] === 1) {
+              const geometry = new THREE.BoxGeometry(this.wallThickness, this.wallHeight, this.wallThickness);
+              const wall = new THREE.Mesh(geometry, wallMaterial);
+              wall.position.set(x * this.wallThickness, this.wallHeight / 2, y * this.wallThickness);
+              this.scene.add(wall);
+              this.walls.push(wall);
+            }
+          }
+        }
+
+        const floorGeometry = new THREE.PlaneGeometry(this.maze[0].length * this.wallThickness, this.maze.length * this.wallThickness);
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.set((this.maze[0].length - 1) * this.wallThickness / 2, 0, (this.maze.length - 1) * this.wallThickness / 2);
+        this.scene.add(floor);
+
+        const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
+        const startBox = new THREE.Mesh(boxGeometry, startBoxMaterial);
+        startBox.position.set(1 * this.wallThickness, 0.5, 1 * this.wallThickness);
+        this.scene.add(startBox);
+
+        const finishPos = this.findFarthestPosition(this.maze, 1, 1);
+        this.finishBox = new THREE.Mesh(boxGeometry, finishBoxMaterial);
+        this.finishBox.position.set(finishPos.x * this.wallThickness, 0.5, finishPos.y * this.wallThickness);
+        this.scene.add(this.finishBox);
+      }
+
+      findFarthestPosition(maze, startX, startY) {
+        const rows = maze.length;
+        const cols = maze[0].length;
+        const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+        // queue: [y, x, turns, prevDir, steps]
+        // prevDir: previous step direction (0: up, 1: down, 2: left, 3: right, null for start)
+        // steps: secondary criteria
+        const queue = [[startY, startX, 0, null, 0]];
+        const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+        let maxTurns = 0;
+        let maxSteps = 0;
+        let farthestPos = { x: startX, y: startY };
+        visited[startY][startX] = true;
+        while (queue.length > 0) {
+          const [y, x, turns, prevDir, steps] = queue.shift();
+          if (turns > maxTurns || (turns === maxTurns && steps > maxSteps)) {
+            maxTurns = turns;
+            maxSteps = steps;
+            farthestPos = { x, y };
+          }
+          for (let dir = 0; dir < directions.length; dir++) {
+            const [dy, dx] = directions[dir];
+            const ny = y + dy;
+            const nx = x + dx;
+            if (
+              ny >= 0 &&
+              ny < rows &&
+              nx >= 0 &&
+              nx < cols &&
+              !visited[ny][nx] &&
+              maze[ny][nx] === 0
+            ) {
+              let newTurns = turns;
+              if (prevDir !== null && prevDir !== dir) {
+                newTurns = turns + 1;
+              }
+              visited[ny][nx] = true;
+              queue.push([ny, nx, newTurns, dir, steps + 1]);
+            }
+          }
+        }
+        return farthestPos;
+      }
+
+      shuffleArray(array, notOriginal = false) {
+        for (let i = array.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + (1 - notOriginal)));
+          [array[i], array[j]] = [array[j], array[i]];
+        }
+      }
+
+      setupLighting() {
+        const colors = {
+          neutral: 0xFFFFFF,
+          red: 0xFF0000,
+          green: 0x00FF00,
+          blue: 0x0000FF,
+          cyan: 0x00FFFF,
+          magenta: 0xFF00FF,
+          yellow: 0xFFFF00,
+          orange: 0xFFA500
+        };
+
+        for (let i = this.scene.children.length - 1; i >= 0; --i) {
+          if (
+            this.scene.children[i] instanceof THREE.AmbientLight ||
+            this.scene.children[i] instanceof THREE.DirectionalLight
+          ) {
+            this.scene.remove(this.scene.children[i]);
+          }
+        }
+        const ambientLight = new THREE.AmbientLight(0x404040, 3);
+        this.scene.add(ambientLight);
+
+        let saturation = [0.1, 0.1, 0.1, 0.1];
+        const r = Math.floor(Math.random() * 4);
+        if (r === 0) {
+          saturation = [0.35, 0.15, 0.3, 0.3];
+        }
+        else if (r === 1) {
+          saturation = [0.15, 0.35, 0.3, 0.3];
+        }
+        else if (r === 2) {
+          saturation = [0.3, 0.3, 0.35, 0.15];
+        }
+        else {
+          saturation = [0.3, 0.3, 0.15, 0.35];
+        }
+
+        let color1, color2, color3, color4;
+        if (colors[this.colorAccent] != null) {
+          color1 = color2 = color3 = color4 = colors[this.colorAccent];
+        }
+        else if (this.colorAccent === 'random-per-maze') {
+          const colorsList = [...Object.values(colors)];
+          this.shuffleArray(colorsList);
+          color1 = color2 = color3 = color4 = colorsList[0];
+        }
+        else if (this.colorAccent === 'random-per-side') {
+          const colorsList = [...Object.values(colors)];
+          this.shuffleArray(colorsList);
+          color1 = colorsList[0];
+          color2 = colorsList[1];
+          color3 = colorsList[2];
+          color4 = colorsList[3];
+        }
+        else {
+          color1 = color2 = color3 = color4 = colors.neutral;
+        }
+
+        const directionalLight1 = new THREE.DirectionalLight(color1, saturation[0]);
+        directionalLight1.position.set(0, 1, 1);
+        this.scene.add(directionalLight1);
+
+        const directionalLight2 = new THREE.DirectionalLight(color2, saturation[1]);
+        directionalLight2.position.set(0, 1, -1);
+        this.scene.add(directionalLight2);
+
+        const directionalLight3 = new THREE.DirectionalLight(color3, saturation[2]);
+        directionalLight3.position.set(1, 1, 0);
+        this.scene.add(directionalLight3);
+
+        const directionalLight4 = new THREE.DirectionalLight(color4, saturation[3]);
+        directionalLight4.position.set(-1, 1, 0);
+        this.scene.add(directionalLight4);
+      }
+
+      setupEventListeners() {
+        document.addEventListener('keydown', (event) => {
+          switch (event.code) {
+            case 'ArrowUp': 
+            case 'KeyW': this.keys.forward = true; break;
+            case 'ArrowDown': 
+            case 'KeyS': this.keys.backward = true; break;
+            case 'ArrowLeft': 
+            case 'KeyA': this.keys.left = true; break;
+            case 'ArrowRight': 
+            case 'KeyD': this.keys.right = true; break;
+            case 'Space': this.keys.jump = true; break;
+            case 'KeyP': this.saveImage(); break;
+            case 'ShiftLeft':
+            case 'ShiftRight':
+              this.keys.shift = true; break;
+          }
+        });
+
+        document.addEventListener('keyup', (event) => {
+          switch (event.code) {
+            case 'ArrowUp': 
+            case 'KeyW': this.keys.forward = false; break;
+            case 'ArrowDown': 
+            case 'KeyS': this.keys.backward = false; break;
+            case 'ArrowLeft': 
+            case 'KeyA': this.keys.left = false; break;
+            case 'ArrowRight': 
+            case 'KeyD': this.keys.right = false; break;
+            case 'KeyG': this.goToStartPosition(); break;
+            case 'Space': this.keys.jump = false; break;
+            case 'ShiftLeft':
+            case 'ShiftRight':
+              this.keys.shift = false; break;
+          }
+        });
+
+        window.addEventListener('resize', () => {
+          this.camera.aspect = window.innerWidth / window.innerHeight;
+          this.camera.updateProjectionMatrix();
+          this.renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+      }
+
+      checkCollision(position) {
+        const playerBox = new THREE.Box3().setFromCenterAndSize(
+          position,
+          new THREE.Vector3(this.player.radius * 2, this.player.height, this.player.radius * 2)
+        );
+
+        for (const wall of this.walls) {
+          const wallBox = new THREE.Box3().setFromObject(wall);
+          if (playerBox.intersectsBox(wallBox)) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      findSafePosition(currentPosition) {
+        if (!this.checkCollision(currentPosition)) {
+          return currentPosition.clone();
+        }
+
+        const searchRadius = 2;
+        const stepSize = 0.2;
+        const safePosition = currentPosition.clone();
+
+        for (let offsetX = -searchRadius; offsetX <= searchRadius; offsetX += stepSize) {
+          for (let offsetZ = -searchRadius; offsetZ <= searchRadius; offsetZ += stepSize) {
+            const testPosition = currentPosition.clone();
+            testPosition.x += offsetX;
+            testPosition.z += offsetZ;
+            testPosition.y = this.player.height;
+
+            if (!this.checkCollision(testPosition)) {
+              return testPosition;
+            }
+          }
+        }
+
+        console.warn("No safe position found, resetting to start");
+        return new THREE.Vector3(1, 1, 1);
+      }
+
+      animate() {
+        requestAnimationFrame(() => this.animate());
+        const time = performance.now();
+        const delta = (time - this.prevTime) / 1000;
+        this.prevTime = time;
+
+        if (this.finishBox && this.checkFinishCollision()) {
+          if (this.autoModeN !== 0) {
+            this.autoModeNCounter += 1;
+            if (this.autoModeNCounter % this.autoModeN === 0) {
+              this.setParameters({
+                mazeY: this.mazeY + 1,
+                mazeX: this.mazeX + 1
+              });
+            }
+          }
+          else {
+            this.autoModeNCounter = 0;
+          }
+          this.eventsCallback({ event: 'new-maze', status: true, parameters: this.getParameters() });
+          this.regenerateMaze();
+          return;
+        }
+
+        if (this.checkCollision(this.player.position)) {
+          const safePosition = this.findSafePosition(this.player.position);
+          this.player.position.copy(safePosition);
+          this.player.velocity.set(0, 0, 0);
+          this.player.onGround = true;
+        }
+
+        this.player.velocity.y += this.player.gravity * delta;
+
+        if (this.keys.jump) {
+          this.player.velocity.y = this.player.jumpVelocity;
+          this.player.onGround = false;
+        }
+
+        const moveSpeed = this.player.moveSpeed * (this.keys.shift ? 2 : 1);
+        const direction = new THREE.Vector3();
+        const frontVector = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        const sideVector = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        frontVector.y = 0;
+        sideVector.y = 0;
+        frontVector.normalize();
+        sideVector.normalize();
+
+        if (this.keys.forward) direction.add(frontVector);
+        if (this.keys.backward) direction.sub(frontVector);
+        if (this.keys.left) direction.sub(sideVector);
+        if (this.keys.right) direction.add(sideVector);
+
+        direction.normalize();
+        this.player.velocity.x = direction.x * moveSpeed;
+        this.player.velocity.z = direction.z * moveSpeed;
+
+        const newPosition = this.player.position.clone();
+
+        newPosition.x += this.player.velocity.x * delta;
+        if (this.checkCollision(newPosition)) {
+          newPosition.x = this.player.position.x;
+          this.player.velocity.x = 0;
+        }
+
+        newPosition.z += this.player.velocity.z * delta;
+        if (this.checkCollision(newPosition)) {
+          newPosition.z = this.player.position.z;
+          this.player.velocity.z = 0;
+        }
+
+        if (!this.checkCollision(newPosition)) {
+          this.player.position.x = newPosition.x;
+          this.player.position.z = newPosition.z;
+        }
+
+        newPosition.y = this.player.position.y + this.player.velocity.y * delta;
+        if (!this.checkCollision(newPosition)) {
+          this.player.position.y = newPosition.y;
+        } else {
+          if (this.player.velocity.y < 0) {
+            this.player.onGround = true;
+            this.player.velocity.y = 0;
+            this.player.position.y = Math.max(0, newPosition.y);
+          } else {
+            this.player.velocity.y = 0;
+          }
+        }
+
+        if (this.player.position.y < this.player.height) {
+          this.player.position.y = this.player.height;
+          this.player.velocity.y = 0;
+          this.player.onGround = true;
+        }
+
+        this.camera.position.copy(this.player.position);
+        this.renderer.render(this.scene, this.camera);
+      }
+
+      checkFinishCollision() {
+        const playerBox = new THREE.Box3().setFromCenterAndSize(
+          this.player.position,
+          new THREE.Vector3(this.player.radius * 2, this.player.height, this.player.radius * 2)
+        );
+        const finishBox = new THREE.Box3().setFromObject(this.finishBox);
+        return playerBox.intersectsBox(finishBox);
+      }
+
+      regenerateMaze() {
+        while (this.scene.children.length > 0) {
+          this.scene.remove(this.scene.children[0]);
+        }
+
+        this.scene = new THREE.Scene();
+
+        this.maze = this.generateRandomMaze(this.mazeY, this.mazeX);
+
+        this.player.position.set(1, this.player.height, 1);
+        this.player.velocity.set(0, 0, 0);
+        this.player.onGround = true;
+
+        this.setupLighting();
+        this.setupMaze();
+        this.setupCamera();
+      }
+
+      saveImage() {
+        this.renderer.render(this.scene, this.camera);
+        const imgData = this.renderer.domElement.toDataURL('image/png');
+        const link = document.createElement('a');
+        link.href = imgData;
+        link.download = 'maze_screenshot.png';
+        link.click();
+      }
+    }
+
+    const settingsNames = {
+      mazeX: 'mz_maze_mini_x',
+      mazeY: 'mz_maze_mini_y',
+      wallDensity: 'mz_maze_mini_wall_density',
+      speed: 'mz_maze_mini_speed',
+      colorAccent: 'mz_maze_mini_color_accent',
+      autoModeN: 'mz_maze_mini_auto_mode_n'
+    };
+    const canvas = document.getElementById('gameCanvas1');
+    const playButton = document.getElementById('playButton');
+    const regenerateMazeButton = document.getElementById('regenerateMazeButton');
+    const regenerateLightingColorsButton = document.getElementById('regenerateLightingColorsButton');
+    const blocker = document.getElementById('blocker');
+    const mazeY = document.getElementById('mazeY');
+    const mazeX = document.getElementById('mazeX');
+    const wallDensity = document.getElementById('wallDensity');
+    const speed = document.getElementById('speed');
+    const colorAccent = document.getElementById('colorAccent');
+    const autoModeN = document.getElementById('autoModeN');
+    mazeX.value = localStorage.getItem(settingsNames.mazeX) || '10';
+    mazeY.value = localStorage.getItem(settingsNames.mazeY) || '10';
+    wallDensity.value = localStorage.getItem(settingsNames.wallDensity) || '50';
+    speed.value = localStorage.getItem(settingsNames.speed) || '5';
+    colorAccent.value = localStorage.getItem(settingsNames.colorAccent) || 'neutral';
+    autoModeN.value = localStorage.getItem(settingsNames.autoModeN) || '0';
+
+    const game = new GameMap(
+      canvas,
+      mazeY.value,
+      mazeX.value,
+      wallDensity.value,
+      speed.value,
+      colorAccent.value,
+      autoModeN.value
+    );
+    game.setEventsCallback((event) => {
+      if (event.event === 'lock' && event.status === true) {
+        blocker.style.display = 'none';
+      }
+      else if (event.event === 'unlock' && event.status === true) {
+        blocker.style.display = '';
+      }
+      else if (event.event === 'new-maze' && event.status === true) {
+        mazeY.value = event.parameters['mazeY'];
+        mazeX.value = event.parameters['mazeX'];
+        localStorage.setItem(settingsNames.mazeX, mazeX.value);
+        localStorage.setItem(settingsNames.mazeY, mazeY.value);
+      }
+    });
+    game.init();
+    playButton.addEventListener('click', (event) => {
+      game.setParameters({
+        speed: speed.value,
+        colorAccent: colorAccent.value,
+        autoModeN: autoModeN.value
+      }, false);
+      game.lock();
+    });
+    regenerateMazeButton.addEventListener('click', (event) => {
+      game.setParameters({
+        mazeY: mazeY.value,
+        mazeX: mazeX.value,
+        wallDensity: wallDensity.value,
+        speed: speed.value,
+        colorAccent: colorAccent.value,
+        autoModeN: autoModeN.value
+      });
+      game.regenerateMaze();
+    });
+    regenerateLightingColorsButton.addEventListener('click', (event) => {
+      game.setParameters({
+        colorAccent: colorAccent.value
+      });
+      game.setupLighting();
+    });
+    mazeX.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.mazeX, mazeX.value);
+    });
+    mazeY.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.mazeY, mazeY.value);
+    });
+    wallDensity.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.wallDensity, wallDensity.value);
+    });
+    speed.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.speed, speed.value);
+    });
+    colorAccent.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.colorAccent, colorAccent.value);
+    });
+    autoModeN.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.autoModeN, autoModeN.value);
+    });
+  </script>
+</body>
+
+</html>
