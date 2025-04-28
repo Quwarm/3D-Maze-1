@@ -180,12 +180,13 @@
           this.eventsCallback({ event: 'unlock', status: true });
         });
 
+        this.wallThickness = 2;
         this.player = {
           height: 1.8,
           radius: 0.4,
           velocity: new THREE.Vector3(),
-          startPosition: new THREE.Vector3(1, 1, 1),
-          position: new THREE.Vector3(1, 1, 1),
+          startPosition: new THREE.Vector3(this.wallThickness, 0.5, this.wallThickness),
+          position: new THREE.Vector3(this.wallThickness, 0.5, this.wallThickness),
           onGround: false,
           jumpVelocity: 12,
           gravity: -9.8 * 4,
@@ -218,9 +219,12 @@
         this.maze = this.generateRandomMaze(this.mazeY, this.mazeX);
 
         this.wallHeight = 3;
-        this.wallThickness = 2;
         this.walls = [];
         this.finishBox = null;
+        this.frontVectorBase = new THREE.Vector3(0, 0, -1);
+        this.sideVectorBase = new THREE.Vector3(1, 0, 0);
+        this.lastPlayerPosition = null;
+        this.speedAcceleration = 0;
         this.prevTime = performance.now();
       }
 
@@ -534,7 +538,7 @@
 
         const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
         const startBox = new THREE.Mesh(boxGeometry, startBoxMaterial);
-        startBox.position.set(1 * this.wallThickness, 0.5, 1 * this.wallThickness);
+        startBox.position.set(this.wallThickness, 0.5, this.wallThickness);
         this.scene.add(startBox);
 
         const finishPos = this.findFarthestPosition(this.maze, 1, 1);
@@ -544,8 +548,8 @@
 
         const movingObjectGeometry = boxGeometry;
         const freeCells = [];
-        for (let y = 1; y < this.mazeY - 1; y++) {
-          for (let x = 1; x < this.mazeX - 1; x++) {
+        for (let y = 2; y < this.mazeY - 1; y++) {
+          for (let x = 2; x < this.mazeX - 1; x++) {
             if (
               this.maze[y][x] === 0 &&
               !(x === this.player.startPosition.x && y === this.player.startPosition.z)
@@ -573,7 +577,10 @@
             targetCell: null,
             moveProgress: 0,
             speed: this.botsSpeed,
-            lastKnownPlayerCell: null
+            lastKnownPlayerCell: null,
+            lastSightCheck: null,
+            availableCells: [],
+            lastCellKey: null
           });
         }
       }
@@ -769,31 +776,37 @@
       }
 
       findSafePosition(currentPosition) {
-        if (!this.checkCollision(currentPosition)) {
-          return currentPosition.clone();
-        }
-
-        const searchRadius = 10;
-        const stepSize = 1;
-        const safePosition = currentPosition.clone();
-
+        const searchRadius = 5 * this.wallThickness;
+        const stepSize = this.wallThickness;
+        const safePositions = [];
         for (let offsetX = -searchRadius; offsetX <= searchRadius; offsetX += stepSize) {
           for (let offsetZ = -searchRadius; offsetZ <= searchRadius; offsetZ += stepSize) {
             const testPosition = currentPosition.clone();
             testPosition.x += offsetX;
             testPosition.z += offsetZ;
             testPosition.y = this.player.height;
-            if (testPosition.x <= 0 || testPosition.z <= 0 || testPosition.x >= this.mazeX || testPosition.z >= this.mazeY) {
+            if (
+              testPosition.x <= 0 ||
+              testPosition.z <= 0 ||
+              testPosition.x >= this.mazeX * this.wallThickness ||
+              testPosition.z >= this.mazeY * this.wallThickness
+            ) {
               continue;
             }
             if (!this.checkCollision(testPosition)) {
-              return testPosition;
+              safePositions.push({
+                position: testPosition,
+                distance: currentPosition.distanceTo(testPosition)
+              });
             }
           }
         }
-
+        if (safePositions.length > 0) {
+          safePositions.sort((a, b) => a.distance - b.distance);
+          return safePositions[0].position.clone();
+        }
         console.warn("No safe position found, resetting to start");
-        return this.player.startPosition;
+        return this.player.startPosition.clone();
       }
 
       checkMovingObjectsCollision() {
@@ -801,7 +814,19 @@
           this.player.position,
           new THREE.Vector3(this.player.radius * 2, this.player.height, this.player.radius * 2)
         );
+        const playerCellX = Math.floor(this.player.position.x / this.wallThickness);
+        const playerCellZ = Math.floor(this.player.position.z / this.wallThickness);
+        const radius = 3;
+
         for (const obj of this.movingObjects) {
+          const objCellX = obj.currentCell.x;
+          const objCellZ = obj.currentCell.y;
+          if (
+            Math.abs(objCellX - playerCellX) > radius ||
+            Math.abs(objCellZ - playerCellZ) > radius
+          ) {
+            continue;
+          }
           const objectBox = new THREE.Box3().setFromObject(obj.mesh);
           if (playerBox.intersectsBox(objectBox)) {
             return true;
@@ -838,8 +863,10 @@
       animate() {
         requestAnimationFrame(() => this.animate());
         const time = performance.now();
-        const delta = (time - this.prevTime) / 1000;
+        const delta = Math.min((time - this.prevTime) / 1000, 0.1);
         this.prevTime = time;
+
+        let needsRender = false;
 
         if (this.finishBox && this.checkFinishCollision()) {
           if (this.autoModeN !== 0) {
@@ -850,8 +877,7 @@
                 mazeX: this.mazeX + 1
               });
             }
-          }
-          else {
+          } else {
             this.autoModeNCounter = 0;
           }
           this.eventsCallback({ event: 'new-maze', status: true, parameters: this.getParameters() });
@@ -861,6 +887,7 @@
 
         if (this.checkMovingObjectsCollision()) {
           this.goToStartPosition();
+          needsRender = true;
         }
 
         if (this.checkCollision(this.player.position)) {
@@ -868,6 +895,7 @@
           this.player.position.copy(safePosition);
           this.player.velocity.set(0, 0, 0);
           this.player.onGround = true;
+          needsRender = true;
         }
 
         this.player.velocity.y += this.player.gravity * delta;
@@ -875,25 +903,33 @@
         if (this.keys.jump && (this.keys.shift || this.player.onGround)) {
           this.player.velocity.y = this.player.jumpVelocity;
           this.player.onGround = false;
+          needsRender = true;
+          this.speedAcceleration = Math.min(20, this.speedAcceleration + 1);
+        }
+        else if (!this.keys.jump) {
+          this.speedAcceleration = 0;
         }
 
-        const moveSpeed = this.player.moveSpeed * (this.keys.shift ? 2 : 1);
+        const moveSpeed = (this.player.moveSpeed + this.speedAcceleration) * (this.keys.shift ? 2 : 1);
         const direction = new THREE.Vector3();
-        const frontVector = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-        const sideVector = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        const frontVector = this.frontVectorBase.clone().applyQuaternion(this.camera.quaternion);
+        const sideVector = this.sideVectorBase.clone().applyQuaternion(this.camera.quaternion);
         frontVector.y = 0;
         sideVector.y = 0;
-        frontVector.normalize();
-        sideVector.normalize();
 
         if (this.keys.forward) direction.add(frontVector);
         if (this.keys.backward) direction.sub(frontVector);
         if (this.keys.left) direction.sub(sideVector);
         if (this.keys.right) direction.add(sideVector);
 
-        direction.normalize();
-        this.player.velocity.x = direction.x * moveSpeed;
-        this.player.velocity.z = direction.z * moveSpeed;
+        if (direction.lengthSq() > 0) {
+          direction.normalize();
+          this.player.velocity.x = direction.x * moveSpeed;
+          this.player.velocity.z = direction.z * moveSpeed;
+        } else {
+          this.player.velocity.x = 0;
+          this.player.velocity.z = 0;
+        }
 
         const newPosition = this.player.position.clone();
 
@@ -912,6 +948,7 @@
         if (!this.checkCollision(newPosition)) {
           this.player.position.x = newPosition.x;
           this.player.position.z = newPosition.z;
+          needsRender = true;
         }
 
         newPosition.y = this.player.position.y + this.player.velocity.y * delta;
@@ -925,19 +962,21 @@
           } else {
             this.player.velocity.y = 0;
           }
+          needsRender = true;
         }
 
         if (this.player.position.y < this.player.height) {
           this.player.position.y = this.player.height;
           this.player.velocity.y = 0;
           this.player.onGround = true;
+          needsRender = true;
         }
 
         const directions = [
-          { dy: -1, dx: 0 }, // up
-          { dy: 1, dx: 0 },  // down
-          { dy: 0, dx: -1 }, // left
-          { dy: 0, dx: 1 }   // right
+          { dy: -1, dx: 0 },
+          { dy: 1, dx: 0 },
+          { dy: 0, dx: -1 },
+          { dy: 0, dx: 1 }
         ];
 
         const playerCell = {
@@ -946,51 +985,70 @@
         };
 
         this.movingObjects.forEach(obj => {
-          if (obj.lastKnownPlayerCell && obj.currentCell.y === obj.lastKnownPlayerCell.y && obj.currentCell.x === obj.lastKnownPlayerCell.x) {
+          if (
+            obj.lastKnownPlayerCell &&
+            obj.currentCell.y === obj.lastKnownPlayerCell.y &&
+            obj.currentCell.x === obj.lastKnownPlayerCell.x
+          ) {
             obj.lastKnownPlayerCell = null;
           }
-          const hasSight = this.hasLineOfSight(obj);
+
+          const currentTime = performance.now();
+          let hasSight = obj.lastSightCheck?.hasSight || false;
+          if (!obj.lastSightCheck || currentTime - obj.lastSightCheck.time > 500) {
+            hasSight = this.hasLineOfSight(obj);
+            obj.lastSightCheck = { hasSight, time: currentTime };
+          }
+
           if (hasSight) {
             obj.lastKnownPlayerCell = { x: playerCell.x, y: playerCell.y };
           }
+
           if (!obj.targetCell || obj.moveProgress >= 1 || obj.targetCell === obj.currentCell) {
             obj.moveProgress = 0;
             obj.currentCell = obj.targetCell || obj.currentCell;
-            const availableCells = [];
-            directions.forEach(dir => {
-              const ny = obj.currentCell.y + dir.dy;
-              const nx = obj.currentCell.x + dir.dx;
-              if (
-                ny >= 0 &&
-                ny < this.maze.length &&
-                nx >= 0 &&
-                nx < this.maze[0].length &&
-                this.maze[ny][nx] === 0 &&
-                !this.isCellOccupied(nx, ny, obj)
-              ) {
-                availableCells.push({ x: nx, y: ny });
-              }
-            });
-            if (availableCells.length > 0) {
+
+            const cellKey = `${obj.currentCell.x},${obj.currentCell.y}`;
+            if (obj.lastCellKey !== cellKey) {
+              obj.availableCells = [];
+              directions.forEach(dir => {
+                const ny = obj.currentCell.y + dir.dy;
+                const nx = obj.currentCell.x + dir.dx;
+                if (
+                  ny >= 0 &&
+                  ny < this.maze.length &&
+                  nx >= 0 &&
+                  nx < this.maze[0].length &&
+                  this.maze[ny][nx] === 0 &&
+                  !this.isCellOccupied(nx, ny, obj)
+                ) {
+                  obj.availableCells.push({ x: nx, y: ny });
+                }
+              });
+              obj.lastCellKey = cellKey;
+            }
+
+            if (obj.availableCells.length > 0) {
               if (obj.lastKnownPlayerCell) {
                 let minDistance = Infinity;
-                let nextCell = availableCells[0];
-                availableCells.forEach(cell => {
+                let nextCell = obj.availableCells[0];
+                obj.availableCells.forEach(cell => {
                   const distance = Math.abs(cell.x - obj.lastKnownPlayerCell.x) +
                     Math.abs(cell.y - obj.lastKnownPlayerCell.y);
-                  if (distance < minDistance || distance === minDistance && Math.random() < 0.5) {
+                  if (distance < minDistance || (distance === minDistance && Math.random() < 0.5)) {
                     minDistance = distance;
                     nextCell = cell;
                   }
                 });
                 obj.targetCell = nextCell;
               } else {
-                obj.targetCell = availableCells[Math.floor(Math.random() * availableCells.length)];
+                obj.targetCell = obj.availableCells[Math.floor(Math.random() * obj.availableCells.length)];
               }
             } else {
               obj.targetCell = obj.currentCell;
             }
           }
+
           if (obj.targetCell !== obj.currentCell) {
             const distance = this.wallThickness;
             const travelTime = distance / obj.speed;
@@ -1000,11 +1058,20 @@
             const y = obj.currentCell.y * this.wallThickness +
               obj.moveProgress * (obj.targetCell.y - obj.currentCell.y) * this.wallThickness;
             obj.mesh.position.set(x, 0.5, y);
+            needsRender = true;
           }
         });
 
         this.camera.position.copy(this.player.position);
-        this.renderer.render(this.scene, this.camera);
+        if (
+          needsRender ||
+          this.player.position.x !== this.lastPlayerPosition?.x ||
+          this.player.position.y !== this.lastPlayerPosition?.y ||
+          this.player.position.z !== this.lastPlayerPosition?.z
+        ) {
+          this.renderer.render(this.scene, this.camera);
+          this.lastPlayerPosition = this.player.position.clone();
+        }
       }
 
       checkFinishCollision() {
@@ -1073,7 +1140,7 @@
     wallDensity.value = localStorage.getItem(settingsNames.wallDensity) || '50';
     speed.value = localStorage.getItem(settingsNames.speed) || '5';
     colorAccent.value = localStorage.getItem(settingsNames.colorAccent) || 'neutral';
-    autoModeN.value = localStorage.getItem(settingsNames.autoModeN) || '0';
+    autoModeN.value = localStorage.getItem(settingsNames.autoModeN) || '1';
     botsNumber.value = localStorage.getItem(settingsNames.botsNumber) || '0';
     botsSpeed.value = localStorage.getItem(settingsNames.botsSpeed) || '3';
 
