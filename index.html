@@ -53,6 +53,11 @@
       margin: 1px;
       padding: 5px;
       text-align: center;
+      font-size: 16px;
+    }
+
+    #infoBlock h1 {
+      font-size: 36px;
     }
 
     #playButton,
@@ -60,10 +65,6 @@
     #regenerateLightingColorsButton,
     #resetSettingsButton {
       cursor: pointer;
-    }
-
-    h1 {
-      font-size: 36px;
     }
   </style>
 </head>
@@ -109,6 +110,16 @@
         <label>
           <span>Max interfering bots (0-20):</span>
           <input type="number" id="botsNumber" min="0" max="20" value="0">
+        </label>
+      </div>
+      <div>
+        <label>
+          <span>Interfering bots shoot:</span>
+          <select id="botsShoot">
+            <option value="simple">Simple</option>
+            <option value="hard">Hard</option>
+            <option value="disable">Disable</option>
+          </select>
         </label>
       </div>
       <div>
@@ -161,7 +172,7 @@
     import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
     class GameMap {
-      constructor(canvas, initMazeY = 40, initMazeX = 40, initWallDensity = 50, initMoveSpeed = 5, colorAccent = 'random', initAutoModeN = 0, initMaxBotsNumber = 0, botsSpeed = 2) {
+      constructor(canvas, initMazeY = 40, initMazeX = 40, initWallDensity = 50, initMoveSpeed = 5, colorAccent = 'random', initAutoModeN = 0, initMaxBotsNumber = 0, botsSpeed = 2, botsShoot = 'simple') {
         this.canvas = canvas;
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -214,16 +225,19 @@
           colorAccent: colorAccent,
           autoModeN: initAutoModeN,
           botsNumber: initMaxBotsNumber,
-          botsSpeed: botsSpeed
+          botsSpeed: botsSpeed,
+          botsShoot: botsShoot
         }, false);
         this.maze = this.generateRandomMaze(this.mazeY, this.mazeX);
 
         this.wallHeight = 3;
         this.walls = [];
         this.finishBox = null;
+        this.projectiles = [];
         this.frontVectorBase = new THREE.Vector3(0, 0, -1);
         this.sideVectorBase = new THREE.Vector3(1, 0, 0);
         this.lastPlayerPosition = null;
+        this.wallGrid = {};
         this.speedAcceleration = 0;
         this.prevTime = performance.now();
       }
@@ -413,7 +427,7 @@
           parameters['wallDensity'] = parseInt(parameters['wallDensity']);
         }
         if (parameters['wallDensity'] != null && parameters['wallDensity'] === parameters['wallDensity'] && parameters['wallDensity'] !== this.wallDensity) {
-          this.wallDensity = Math.max(10, Math.min(90, parameters['wallDensity']));
+          this.wallDensity = Math.max(0, Math.min(90, parameters['wallDensity']));
           changed = true;
         }
         if (parameters['speed'] != null) {
@@ -443,6 +457,9 @@
         }
         if (parameters['botsSpeed'] != null && parameters['botsSpeed'] === parameters['botsSpeed'] && parameters['botsSpeed'] !== this.botsSpeed) {
           this.botsSpeed = Math.max(1, parameters['botsSpeed']);
+        }
+        if (parameters['botsShoot'] != null && parameters['botsShoot'] !== this.botsShoot) {
+          this.botsShoot = parameters['botsShoot'];
         }
         if (changed && regenerate) {
           this.regenerateMaze();
@@ -497,7 +514,7 @@
       }
 
       goToStartPosition() {
-        this.player.position.set(1, this.player.height, 1);
+        this.player.position.set(this.player.startPosition.x, this.player.startPosition.y, this.player.startPosition.z);
         this.player.velocity.set(0, 0, 0);
         this.player.onGround = true;
         this.setupCamera();
@@ -509,6 +526,7 @@
         const startBoxMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
         const finishBoxMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
         const movingObjectMaterial = new THREE.MeshStandardMaterial({ color: 0xFFA500 });
+        const projectileMaterial = new THREE.MeshStandardMaterial({ color: 0xFF0000 });
 
         this.walls.forEach(wall => this.scene.remove(wall));
         this.walls = [];
@@ -537,22 +555,30 @@
         this.scene.add(floor);
 
         const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const startBox = new THREE.Mesh(boxGeometry, startBoxMaterial);
-        startBox.position.set(this.wallThickness, 0.5, this.wallThickness);
-        this.scene.add(startBox);
+        this.startBox = new THREE.Mesh(boxGeometry, startBoxMaterial);
+        this.startBox.position.set(this.wallThickness, 0.5, this.wallThickness);
+        this.scene.add(this.startBox);
 
         const finishPos = this.findFarthestPosition(this.maze, 1, 1);
         this.finishBox = new THREE.Mesh(boxGeometry, finishBoxMaterial);
         this.finishBox.position.set(finishPos.x * this.wallThickness, 0.5, finishPos.y * this.wallThickness);
         this.scene.add(this.finishBox);
 
+        const startBoxPositionXf = this.startBox.position.x / this.wallThickness;
+        const startBoxPositionYf = this.startBox.position.z / this.wallThickness;
+        const finishBoxPositionXf = this.finishBox.position.x / this.wallThickness;
+        const finishBoxPositionYf = this.finishBox.position.z / this.wallThickness;
+
         const movingObjectGeometry = boxGeometry;
         const freeCells = [];
-        for (let y = 2; y < this.mazeY - 1; y++) {
-          for (let x = 2; x < this.mazeX - 1; x++) {
+        for (let y = 1; y < this.mazeY - 1; y++) {
+          for (let x = 1; x < this.mazeX - 1; x++) {
             if (
               this.maze[y][x] === 0 &&
-              !(x === this.player.startPosition.x && y === this.player.startPosition.z)
+              (Math.abs(startBoxPositionXf - x) >= 1 ||
+               Math.abs(startBoxPositionYf - y) >= 1) &&
+              (Math.abs(finishBoxPositionXf - x) >= 1 ||
+               Math.abs(finishBoxPositionYf - y) >= 1)
             ) {
               freeCells.push({ x, y });
             }
@@ -580,9 +606,15 @@
             lastKnownPlayerCell: null,
             lastSightCheck: null,
             availableCells: [],
-            lastCellKey: null
+            lastCellKey: null,
+            lastShotTime: 0,
+            shootInterval: 2
           });
         }
+
+        this.projectiles = [];
+        this.projectileGeometry = new THREE.SphereGeometry(0.2, 8, 8);
+        this.projectileMaterial = projectileMaterial;
       }
 
       findFarthestPosition(maze, startX, startY) {
@@ -835,6 +867,22 @@
         return false;
       }
 
+      checkProjectileCollision() {
+        const playerBox = new THREE.Box3().setFromCenterAndSize(
+          this.player.position,
+          new THREE.Vector3(this.player.radius * 2, this.player.height, this.player.radius * 2)
+        );
+        for (const projectile of this.projectiles) {
+          const projectileBox = new THREE.Box3().setFromObject(projectile.mesh);
+          if (playerBox.intersectsBox(projectileBox)) {
+            this.scene.remove(projectile.mesh);
+            this.projectiles = this.projectiles.filter(p => p !== projectile);
+            return true;
+          }
+        }
+        return false;
+      }
+
       hasLineOfSight(object) {
         const objectPos = object.mesh.position;
         const playerPos = this.player.position;
@@ -845,8 +893,15 @@
       }
 
       isCellOccupied(x, y, excludeObject = null) {
+        const startBoxPositionXf = this.startBox.position.x / this.wallThickness;
+        const startBoxPositionYf = this.startBox.position.z / this.wallThickness;
+        const finishBoxPositionXf = this.finishBox.position.x / this.wallThickness;
+        const finishBoxPositionYf = this.finishBox.position.z / this.wallThickness;
         for (const obj of this.movingObjects) {
-          if (x === this.player.startPosition.x && y === this.player.startPosition.y) {
+          if (Math.abs(startBoxPositionXf - x) < 1 && Math.abs(startBoxPositionYf - y) < 1) {
+            return true;
+          }
+          if (Math.abs(finishBoxPositionXf - x) < 1 && Math.abs(finishBoxPositionYf - y) < 1) {
             return true;
           }
           if (obj === excludeObject) continue;
@@ -858,6 +913,24 @@
           }
         }
         return false;
+      }
+
+      shootProjectile(shooter) {
+        if (this.projectiles.length >= 10) return;
+        const projectile = new THREE.Mesh(this.projectileGeometry, this.projectileMaterial);
+        projectile.position.copy(shooter.mesh.position);
+        const direction = new THREE.Vector3()
+          .subVectors(this.player.position, shooter.mesh.position)
+          .normalize();
+        const speed = this.player.moveSpeed;
+        const velocity = direction.multiplyScalar(speed);
+        this.scene.add(projectile);
+        this.projectiles.push({
+          mesh: projectile,
+          velocity: velocity,
+          distanceTraveled: 0,
+          maxDistance: 10 * this.wallThickness
+        });
       }
 
       animate() {
@@ -885,7 +958,7 @@
           return;
         }
 
-        if (this.checkMovingObjectsCollision()) {
+        if (this.checkMovingObjectsCollision() || this.checkProjectileCollision()) {
           this.goToStartPosition();
           needsRender = true;
         }
@@ -993,15 +1066,19 @@
             obj.lastKnownPlayerCell = null;
           }
 
-          const currentTime = performance.now();
+          const currentTime = time / 1000;
           let hasSight = obj.lastSightCheck?.hasSight || false;
-          if (!obj.lastSightCheck || currentTime - obj.lastSightCheck.time > 500) {
+          if (!obj.lastSightCheck || currentTime - obj.lastSightCheck.time > 0.5) {
             hasSight = this.hasLineOfSight(obj);
             obj.lastSightCheck = { hasSight, time: currentTime };
           }
 
           if (hasSight) {
             obj.lastKnownPlayerCell = { x: playerCell.x, y: playerCell.y };
+            if (currentTime - obj.lastShotTime > obj.shootInterval && this.botsShoot !== 'disable') {
+              this.shootProjectile(obj);
+              obj.lastShotTime = currentTime;
+            }
           }
 
           if (!obj.targetCell || obj.moveProgress >= 1 || obj.targetCell === obj.currentCell) {
@@ -1062,12 +1139,38 @@
           }
         });
 
+        this.projectiles = this.projectiles.filter(projectile => {
+          if (this.botsShoot === 'hard') {
+            const direction = new THREE.Vector3()
+              .subVectors(this.player.position, projectile.mesh.position)
+              .normalize();
+            projectile.velocity = direction.multiplyScalar(this.player.moveSpeed);
+          }
+          const moveDistance = projectile.velocity.length() * delta;
+          projectile.distanceTraveled += moveDistance;
+          projectile.mesh.position.addScaledVector(projectile.velocity, delta);
+          const projectileBox = new THREE.Box3().setFromObject(projectile.mesh);
+          let hitWall = false;
+          for (const wall of this.walls) {
+            const wallBox = new THREE.Box3().setFromObject(wall);
+            if (projectileBox.intersectsBox(wallBox)) {
+              hitWall = true;
+              break;
+            }
+          }
+          if (projectile.distanceTraveled >= projectile.maxDistance || hitWall) {
+            this.scene.remove(projectile.mesh);
+            return false;
+          }
+          return true;
+        });
         this.camera.position.copy(this.player.position);
         if (
           needsRender ||
           this.player.position.x !== this.lastPlayerPosition?.x ||
           this.player.position.y !== this.lastPlayerPosition?.y ||
-          this.player.position.z !== this.lastPlayerPosition?.z
+          this.player.position.z !== this.lastPlayerPosition?.z ||
+          this.projectiles.length > 0
         ) {
           this.renderer.render(this.scene, this.camera);
           this.lastPlayerPosition = this.player.position.clone();
@@ -1092,7 +1195,7 @@
 
         this.maze = this.generateRandomMaze(this.mazeY, this.mazeX);
 
-        this.player.position.set(1, this.player.height, 1);
+        this.player.position.set(this.player.startPosition.x, this.player.startPosition.y, this.player.startPosition.z);
         this.player.velocity.set(0, 0, 0);
         this.player.onGround = true;
 
@@ -1119,7 +1222,8 @@
       colorAccent: 'mz_maze_mini_color_accent',
       autoModeN: 'mz_maze_mini_auto_mode_n',
       botsNumber: 'mz_maze_mini_bots',
-      botsSpeed: 'mz_maze_mini_bots_speed'
+      botsSpeed: 'mz_maze_mini_bots_speed',
+      botsShoot: 'mz_maze_mini_bots_shoot'
     };
     const canvas = document.getElementById('gameCanvas1');
     const playButton = document.getElementById('playButton');
@@ -1135,6 +1239,7 @@
     const autoModeN = document.getElementById('autoModeN');
     const botsNumber = document.getElementById('botsNumber');
     const botsSpeed = document.getElementById('botsSpeed');
+    const botsShoot = document.getElementById('botsShoot');
     mazeX.value = localStorage.getItem(settingsNames.mazeX) || '10';
     mazeY.value = localStorage.getItem(settingsNames.mazeY) || '10';
     wallDensity.value = localStorage.getItem(settingsNames.wallDensity) || '50';
@@ -1143,6 +1248,7 @@
     autoModeN.value = localStorage.getItem(settingsNames.autoModeN) || '1';
     botsNumber.value = localStorage.getItem(settingsNames.botsNumber) || '0';
     botsSpeed.value = localStorage.getItem(settingsNames.botsSpeed) || '3';
+    botsShoot.value = localStorage.getItem(settingsNames.botsShoot) || 'simple';
 
     const game = new GameMap(
       canvas,
@@ -1153,7 +1259,8 @@
       colorAccent.value,
       autoModeN.value,
       botsNumber.value,
-      botsSpeed.value
+      botsSpeed.value,
+      botsShoot.value
     );
     game.setEventsCallback((event) => {
       if (event.event === 'lock' && event.status === true) {
@@ -1174,7 +1281,8 @@
       game.setParameters({
         speed: speed.value,
         colorAccent: colorAccent.value,
-        autoModeN: autoModeN.value
+        autoModeN: autoModeN.value,
+        botsShoot: botsShoot.value
       }, false);
       game.lock();
     });
@@ -1187,7 +1295,8 @@
         colorAccent: colorAccent.value,
         autoModeN: autoModeN.value,
         botsNumber: botsNumber.value,
-        botsSpeed: botsSpeed.value
+        botsSpeed: botsSpeed.value,
+        botsShoot: botsShoot.value
       });
       game.regenerateMaze();
     });
@@ -1229,6 +1338,9 @@
     });
     botsSpeed.addEventListener('input', () => {
       localStorage.setItem(settingsNames.botsSpeed, botsSpeed.value);
+    });
+    botsShoot.addEventListener('input', () => {
+      localStorage.setItem(settingsNames.botsShoot, botsShoot.value);
     });
   </script>
 </body>
