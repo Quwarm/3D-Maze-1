@@ -955,7 +955,6 @@
           } else {
             this.autoModeNCounter = 0;
           }
-          this.eventsCallback({ event: 'new-maze', status: true, parameters: this.getParameters() });
           this.regenerateMaze();
           return;
         }
@@ -1182,6 +1181,7 @@
         this.setupLighting();
         this.setupMaze();
         this.setupCamera();
+        this.eventsCallback({ event: 'new-maze', status: true, parameters: this.getParameters() });
       }
 
       saveImage() {
@@ -1192,6 +1192,12 @@
         link.download = 'maze_screenshot.png';
         link.click();
       }
+    }
+
+    function timeStep() {
+      timeState += 1;
+      timeInfo.innerHTML = new Date(1000 * timeState).toISOString().substr(11, 8);
+      setTimeout(() => timeStep(), 1000);
     }
 
     const settingsNames = {
@@ -1221,6 +1227,7 @@
     const botsSpeed = document.getElementById('botsSpeed');
     const botsShoot = document.getElementById('botsShoot');
     const timeInfo = document.getElementById('timeInfo');
+    let timeState = 0;
     mazeX.value = localStorage.getItem(settingsNames.mazeX) || '10';
     mazeY.value = localStorage.getItem(settingsNames.mazeY) || '10';
     wallDensity.value = localStorage.getItem(settingsNames.wallDensity) || '50';
@@ -1255,6 +1262,7 @@
         mazeX.value = event.parameters['mazeX'];
         localStorage.setItem(settingsNames.mazeX, mazeX.value);
         localStorage.setItem(settingsNames.mazeY, mazeY.value);
+        timeState = 0;
       }
     });
     game.init();
@@ -1296,6 +1304,7 @@
       }
       window.location.reload();
     });
+    setTimeout(() => timeStep(), 1000);
     mazeX.addEventListener('input', () => {
       localStorage.setItem(settingsNames.mazeX, mazeX.value);
     });
