@@ -158,6 +158,7 @@
   <div id="ui">
     <p>Mouse: Look | WASD/↑←↓→: Move | C or Space: Jump | T or Shift: overdrive mode</p>
     <p>G: Start position | P: Save Image</p>
+    <p id="timeInfo"></p>
   </div>
   <script type="importmap">
     {
@@ -236,7 +237,6 @@
         this.projectiles = [];
         this.frontVectorBase = new THREE.Vector3(0, 0, -1);
         this.sideVectorBase = new THREE.Vector3(1, 0, 0);
-        this.lastPlayerPosition = null;
         this.wallGrid = {};
         this.speedAcceleration = 0;
         this.prevTime = performance.now();
@@ -508,16 +508,18 @@
         this.renderer.setPixelRatio(window.devicePixelRatio);
       }
 
-      setupCamera() {
+      setupCamera(rotation = true) {
         this.camera.position.copy(this.player.position);
-        this.camera.rotation.set(0, 225 * Math.PI / 180, 0);
+        if (rotation) {
+          this.camera.rotation.set(0, 225 * Math.PI / 180, 0);
+        }
       }
 
-      goToStartPosition() {
+      goToStartPosition(rotation = true) {
         this.player.position.set(this.player.startPosition.x, this.player.startPosition.y, this.player.startPosition.z);
         this.player.velocity.set(0, 0, 0);
         this.player.onGround = true;
-        this.setupCamera();
+        this.setupCamera(rotation);
       }
 
       setupMaze() {
@@ -576,9 +578,9 @@
             if (
               this.maze[y][x] === 0 &&
               (Math.abs(startBoxPositionXf - x) >= 1 ||
-               Math.abs(startBoxPositionYf - y) >= 1) &&
+                Math.abs(startBoxPositionYf - y) >= 1) &&
               (Math.abs(finishBoxPositionXf - x) >= 1 ||
-               Math.abs(finishBoxPositionYf - y) >= 1)
+                Math.abs(finishBoxPositionYf - y) >= 1)
             ) {
               freeCells.push({ x, y });
             }
@@ -586,10 +588,13 @@
         }
         const numObjects = Math.max(0, Math.min(this.maxBotsNumber, Math.max(1, Math.floor(Math.sqrt(freeCells.length)) - 1)));
         this.movingObjects = [];
+        this.shuffleArray(freeCells);
+        freeCells.sort((a, b) => {
+          return Math.max(b.x - a.x, b.y - a.y);
+        });
         for (let i = 0; i < numObjects; i++) {
           if (freeCells.length === 0) break;
-          const index = Math.floor(Math.random() * freeCells.length);
-          const cell = freeCells.splice(index, 1)[0];
+          const cell = freeCells.splice(0, 1)[0];
           const movingObject = new THREE.Mesh(movingObjectGeometry, movingObjectMaterial);
           movingObject.position.set(
             cell.x * this.wallThickness,
@@ -606,7 +611,6 @@
             lastKnownPlayerCell: null,
             lastSightCheck: null,
             availableCells: [],
-            lastCellKey: null,
             lastShotTime: 0,
             shootInterval: 2
           });
@@ -939,8 +943,6 @@
         const delta = Math.min((time - this.prevTime) / 1000, 0.1);
         this.prevTime = time;
 
-        let needsRender = false;
-
         if (this.finishBox && this.checkFinishCollision()) {
           if (this.autoModeN !== 0) {
             this.autoModeNCounter += 1;
@@ -959,8 +961,7 @@
         }
 
         if (this.checkMovingObjectsCollision() || this.checkProjectileCollision()) {
-          this.goToStartPosition();
-          needsRender = true;
+          this.goToStartPosition(false);
         }
 
         if (this.checkCollision(this.player.position)) {
@@ -968,7 +969,6 @@
           this.player.position.copy(safePosition);
           this.player.velocity.set(0, 0, 0);
           this.player.onGround = true;
-          needsRender = true;
         }
 
         this.player.velocity.y += this.player.gravity * delta;
@@ -976,7 +976,6 @@
         if (this.keys.jump && (this.keys.shift || this.player.onGround)) {
           this.player.velocity.y = this.player.jumpVelocity;
           this.player.onGround = false;
-          needsRender = true;
           this.speedAcceleration = Math.min(20, this.speedAcceleration + 1);
         }
         else if (!this.keys.jump) {
@@ -1021,7 +1020,6 @@
         if (!this.checkCollision(newPosition)) {
           this.player.position.x = newPosition.x;
           this.player.position.z = newPosition.z;
-          needsRender = true;
         }
 
         newPosition.y = this.player.position.y + this.player.velocity.y * delta;
@@ -1035,14 +1033,12 @@
           } else {
             this.player.velocity.y = 0;
           }
-          needsRender = true;
         }
 
         if (this.player.position.y < this.player.height) {
           this.player.position.y = this.player.height;
           this.player.velocity.y = 0;
           this.player.onGround = true;
-          needsRender = true;
         }
 
         const directions = [
@@ -1084,27 +1080,21 @@
           if (!obj.targetCell || obj.moveProgress >= 1 || obj.targetCell === obj.currentCell) {
             obj.moveProgress = 0;
             obj.currentCell = obj.targetCell || obj.currentCell;
-
-            const cellKey = `${obj.currentCell.x},${obj.currentCell.y}`;
-            if (obj.lastCellKey !== cellKey) {
-              obj.availableCells = [];
-              directions.forEach(dir => {
-                const ny = obj.currentCell.y + dir.dy;
-                const nx = obj.currentCell.x + dir.dx;
-                if (
-                  ny >= 0 &&
-                  ny < this.maze.length &&
-                  nx >= 0 &&
-                  nx < this.maze[0].length &&
-                  this.maze[ny][nx] === 0 &&
-                  !this.isCellOccupied(nx, ny, obj)
-                ) {
-                  obj.availableCells.push({ x: nx, y: ny });
-                }
-              });
-              obj.lastCellKey = cellKey;
-            }
-
+            obj.availableCells = [];
+            directions.forEach(dir => {
+              const ny = obj.currentCell.y + dir.dy;
+              const nx = obj.currentCell.x + dir.dx;
+              if (
+                ny >= 0 &&
+                ny < this.maze.length &&
+                nx >= 0 &&
+                nx < this.maze[0].length &&
+                this.maze[ny][nx] === 0 &&
+                !this.isCellOccupied(nx, ny, obj)
+              ) {
+                obj.availableCells.push({ x: nx, y: ny });
+              }
+            });
             if (obj.availableCells.length > 0) {
               if (obj.lastKnownPlayerCell) {
                 let minDistance = Infinity;
@@ -1135,7 +1125,6 @@
             const y = obj.currentCell.y * this.wallThickness +
               obj.moveProgress * (obj.targetCell.y - obj.currentCell.y) * this.wallThickness;
             obj.mesh.position.set(x, 0.5, y);
-            needsRender = true;
           }
         });
 
@@ -1144,7 +1133,7 @@
             const direction = new THREE.Vector3()
               .subVectors(this.player.position, projectile.mesh.position)
               .normalize();
-            projectile.velocity = direction.multiplyScalar(this.player.moveSpeed);
+            projectile.velocity = direction.multiplyScalar(moveSpeed);
           }
           const moveDistance = projectile.velocity.length() * delta;
           projectile.distanceTraveled += moveDistance;
@@ -1165,16 +1154,7 @@
           return true;
         });
         this.camera.position.copy(this.player.position);
-        if (
-          needsRender ||
-          this.player.position.x !== this.lastPlayerPosition?.x ||
-          this.player.position.y !== this.lastPlayerPosition?.y ||
-          this.player.position.z !== this.lastPlayerPosition?.z ||
-          this.projectiles.length > 0
-        ) {
-          this.renderer.render(this.scene, this.camera);
-          this.lastPlayerPosition = this.player.position.clone();
-        }
+        this.renderer.render(this.scene, this.camera);
       }
 
       checkFinishCollision() {
@@ -1240,6 +1220,7 @@
     const botsNumber = document.getElementById('botsNumber');
     const botsSpeed = document.getElementById('botsSpeed');
     const botsShoot = document.getElementById('botsShoot');
+    const timeInfo = document.getElementById('timeInfo');
     mazeX.value = localStorage.getItem(settingsNames.mazeX) || '10';
     mazeY.value = localStorage.getItem(settingsNames.mazeY) || '10';
     wallDensity.value = localStorage.getItem(settingsNames.wallDensity) || '50';
